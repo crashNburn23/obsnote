@@ -24,8 +24,8 @@ assume is private.
 - Notes are plain markdown files on disk. If your vault syncs anywhere
   (Obsidian Sync, iCloud, Dropbox, a git repo), whatever obsnote writes goes
   wherever that syncs.
-- It's a few hundred lines in a single file (`obsnote/cli.py`) — if you're
-  not sure what it's doing with your data, it's a quick read.
+- Most behavior still lives in one small CLI module (`obsnote/cli.py`) — if
+  you're not sure what it's doing with your data, it's a quick read.
 
 Don't paste real credentials into a terminal that's feeding this tool.
 
@@ -87,8 +87,9 @@ weeks of notes.
 | `obsnote page new/use <name>` | create or switch the active page |
 | `obsnote pages` | list pages in the vault |
 | `obsnote tail [--page] [-n]` | read-only peek at the last entries on a page |
-| `obsnote show` | read-only status: active page, last command, markers |
+| `obsnote show` | read-only status: capture state, active page, last command, markers |
 | `obsnote start` | preflight check: vault, config, shell hook |
+| `obsnote stop` / `obsnote resume` | pause/resume passive shell-history capture, with a confirmed status readout |
 
 Run `obsnote <command> --help` for the full flag list on any of these.
 
@@ -109,6 +110,10 @@ Two guardrails on top of that:
 `obsnote run` bypasses redaction on purpose — if you explicitly ran a command
 through obsnote, that's an intentional capture, not passive history.
 
+Doing something sensitive and don't trust the pattern list to catch it? Run
+`obsnote stop` to pause passive capture entirely (it reads the state back and
+confirms it actually took), and `obsnote resume` when you're done.
+
 ## Config
 
 Settings resolve in this order: environment variables (`OBSNOTE_VAULT`,
@@ -120,9 +125,10 @@ without touching your global setup.
 
 ## Status
 
-Early, actively-changing personal tool. No test suite yet, no guarantees —
-if something breaks, `obsnote start` and `obsnote show` are your first stop
-for diagnosing it.
+Early, actively-changing personal tool. There is now a small standard-library
+test suite for the core CLI/state behavior, but no broad compatibility matrix
+or security guarantees. If something breaks, `obsnote start` and `obsnote show`
+are your first stop for diagnosing it.
 
 ## License
 

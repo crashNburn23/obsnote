@@ -84,18 +84,28 @@ def load_json(path: Path) -> dict[str, Any]:
             data = json.load(fh)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"Invalid JSON in {path}: {exc}") from exc
+    except OSError as exc:
+        raise SystemExit(f"Could not read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise SystemExit(f"Expected an object in {path}")
     return data
 
 
 def save_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
-    tmp.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        tmp.replace(path)
+    except OSError as exc:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise SystemExit(f"Could not write {path}: {exc}") from exc
 
 
 def safe_cwd() -> Path | None:
