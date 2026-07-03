@@ -71,7 +71,10 @@ your vault, config, and shell hook, and tells you exactly what's missing.
   directory changes (`# in ~/proj`) when the stretch spans more than one, and
   `obsnote since lab1 --ok-only` drops the failed attempts and keeps the path
   that worked. Passive capture is off until you `mark` — see
-  [Shell integration](#shell-integration) for the on/off details.
+  [Shell integration](#shell-integration) for the on/off details. `obsnote mark`
+  with no name auto-numbers it (`1`, `2`, ...) instead of colliding on a
+  shared `default` marker; `obsnote since`/`obsnote unmark` with no name
+  resolve to that marker automatically as long as it's the only one around.
 - **Annotate** drops a note *into* that command timeline mid-session —
   `obsnote annotate "switching to venv setup here"` shows up as an Obsidian
   callout between command blocks the next time you `since` it.
@@ -94,10 +97,10 @@ history.
 | `obsnote note [text]` | append a freeform note (reads stdin if omitted) |
 | `obsnote run -- <cmd>` | run a command, capture output, append it |
 | `obsnote save [--output\|--synth]` | append the last captured command / its output / an LLM summary |
-| `obsnote mark [name]` | set a checkpoint in your shell history; turns passive capture on if it was off |
+| `obsnote mark [name]` | set a checkpoint in your shell history (name defaults to auto-numbered `1`, `2`, ...); turns passive capture on if it was off |
 | `obsnote marks [name]` | list markers, or preview commands since one |
-| `obsnote unmark [name]` | delete a marker; turns passive capture back off if no markers remain |
-| `obsnote since [name] [--synth] [--ok-only]` | write everything since a marker (optionally summarized, optionally only what succeeded); turns passive capture back off unless another marker is still pending |
+| `obsnote unmark [name]` | delete a marker (name defaults to `default`, or the only marker if just one exists); turns passive capture back off if no markers remain |
+| `obsnote since [name] [--synth] [--ok-only]` | write everything since a marker (name defaults to `default`, or the only marker if just one exists); turns passive capture back off unless another marker is still pending |
 | `obsnote annotate [text]` | insert a note into the pending command timeline |
 | `obsnote summary [text]` | add a summary that posts before the pending command timeline |
 | `obsnote undo [--page]` | remove the last obsnote entry from a page |

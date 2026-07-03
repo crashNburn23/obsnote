@@ -400,6 +400,20 @@ def marker_name(value: str | None) -> str:
     return value.strip() if value and value.strip() else "default"
 
 
+def next_auto_marker_name(all_markers: dict[str, Any]) -> str:
+    n = len(all_markers) + 1
+    while str(n) in all_markers:
+        n += 1
+    return str(n)
+
+
+def resolve_marker_arg(raw_name: str | None) -> str:
+    all_markers = markers(load_last())
+    if raw_name is None and len(all_markers) == 1:
+        return next(iter(all_markers))
+    return marker_name(raw_name)
+
+
 def history_since_marker(name: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = load_last()
     history = command_history(data)
@@ -814,7 +828,8 @@ def set_marker(name: str, page: str) -> None:
 def cmd_mark(args: argparse.Namespace) -> int:
     settings = load_settings()
     page = resolve_target_page(args.page, settings)
-    name = marker_name(args.name)
+    raw = args.name.strip() if args.name else ""
+    name = raw or next_auto_marker_name(markers(load_last()))
     if is_capture_paused():
         set_capture_paused(False)
         print("capture: OFF -> ON (recording until `since`/`unmark`)", file=sys.stderr)
@@ -857,7 +872,7 @@ def cmd_mark_show(raw_name: str) -> int:
 
 
 def cmd_mark_del(args: argparse.Namespace) -> int:
-    name = marker_name(args.name)
+    name = resolve_marker_arg(args.name)
     data = load_last()
     all_markers = markers(data)
     if name not in all_markers:
@@ -979,7 +994,7 @@ def since_entries(args: argparse.Namespace, name: str) -> tuple[dict[str, Any], 
 
 def cmd_history_since(args: argparse.Namespace) -> int:
     settings = load_settings()
-    name = marker_name(args.name)
+    name = resolve_marker_arg(args.name)
     marker, entries = since_entries(args, name)
     page = resolve_since_page(args, settings, marker)
     tags = format_tags(args.tag)
@@ -994,7 +1009,7 @@ def cmd_history_since(args: argparse.Namespace) -> int:
 
 def cmd_synth_since(args: argparse.Namespace) -> int:
     settings = load_settings()
-    name = marker_name(args.name)
+    name = resolve_marker_arg(args.name)
     marker, entries = since_entries(args, name)
     summary = synthesize_history(settings, name, entries)
     page = resolve_since_page(args, settings, marker)
@@ -1394,7 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     mark = sub.add_parser("mark", help="set a command-history marker")
-    mark.add_argument("name", nargs="?", help="marker name (default: 'default')")
+    mark.add_argument("name", nargs="?", help="marker name (defaults to an auto-numbered '1', '2', ...)")
     mark.add_argument("--page", "-p", help="page this marker belongs to (defaults to the active page)")
     mark.set_defaults(func=cmd_mark)
 
@@ -1403,11 +1418,15 @@ def build_parser() -> argparse.ArgumentParser:
     marks.set_defaults(func=cmd_mark_list)
 
     unmark = sub.add_parser("unmark", help="delete a marker")
-    unmark.add_argument("name", nargs="?", help="marker name (default: 'default')")
+    unmark.add_argument(
+        "name", nargs="?", help="marker name (defaults to 'default', or the only marker if just one exists)"
+    )
     unmark.set_defaults(func=cmd_mark_del)
 
     since = sub.add_parser("since", help="append commands since a marker")
-    since.add_argument("name", nargs="?")
+    since.add_argument(
+        "name", nargs="?", help="marker name (defaults to 'default', or the only marker if just one exists)"
+    )
     since.add_argument("--synth", action="store_true", help="append a local-LLM summary")
     since.add_argument(
         "--ok-only",

@@ -253,6 +253,51 @@ class CliTest(unittest.TestCase):
         self.assertIn("ON -> OFF", stderr)
         self.assertTrue(self.read_state()["capture_paused"])
 
+    def test_unmark_with_no_name_deletes_the_sole_marker(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("mark", "lab1")
+
+        code, stdout, _ = self.run_cli("unmark")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Deleted marker `lab1`", stdout)
+        self.assertEqual(self.read_state().get("markers", {}), {})
+
+    def test_unmark_with_no_name_and_multiple_markers_requires_a_name(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("mark", "lab1")
+        self.run_cli("mark", "lab2")
+
+        with self.assertRaises(SystemExit):
+            self.run_cli("unmark")
+
+        state = self.read_state()
+        self.assertEqual(set(state["markers"]), {"lab1", "lab2"})
+
+    def test_mark_with_no_name_auto_numbers(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+
+        code, stdout, _ = self.run_cli("mark")
+        self.assertEqual(code, 0)
+        self.assertIn("Marked `1`", stdout)
+
+        code, stdout, _ = self.run_cli("mark")
+        self.assertEqual(code, 0)
+        self.assertIn("Marked `2`", stdout)
+
+        self.assertEqual(set(self.read_state()["markers"]), {"1", "2"})
+
+    def test_mark_then_since_with_no_names_round_trips(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+
+        self.run_cli("mark")
+        self.run_cli("remember-cmd", "--", "echo one")
+        code, stdout, _ = self.run_cli("since")
+
+        self.assertEqual(code, 0)
+        text = (self.vault / "notes.md").read_text(encoding="utf-8")
+        self.assertIn("echo one", text)
+
     def test_doctor_and_legacy_start_alias(self) -> None:
         self.write_config(vault=str(self.vault), note="notes.md")
         for name in ("doctor", "start"):
