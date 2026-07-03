@@ -27,6 +27,9 @@ assume is private.
 - The passive capture keeps a rolling shadow of your shell history (plus the
   last captured command's full output) in plaintext under
   `~/.local/state/obsnote/`. `obsnote forget` clears it.
+- Passive capture is off by default and only runs while you're inside a
+  `mark` → `since` bracket (or after you explicitly `obsnote resume`) — see
+  [Shell integration](#shell-integration).
 - Most behavior still lives in one small CLI module (`obsnote/cli.py`) — if
   you're not sure what it's doing with your data, it's a quick read.
 
@@ -44,9 +47,10 @@ pip install -e .
 
 ```bash
 obsnote config --vault ~/path/to/your/ObsidianVault
-obsnote shell-install bash   # wires up automatic command capture (or: zsh)
+obsnote shell-install bash   # wires up the hook, capture starts OFF (or: zsh)
 source ~/.bashrc             # or just open a new terminal
 obsnote doctor               # sanity-check that all of the above actually worked
+obsnote mark                 # turns capture on and starts a session
 ```
 
 `obsnote doctor` is worth running any time something seems off — it checks
@@ -66,7 +70,8 @@ your vault, config, and shell hook, and tells you exactly what's missing.
   directory, so the rendered block flags failures (`# exited 1`), notes
   directory changes (`# in ~/proj`) when the stretch spans more than one, and
   `obsnote since lab1 --ok-only` drops the failed attempts and keeps the path
-  that worked.
+  that worked. Passive capture is off until you `mark` — see
+  [Shell integration](#shell-integration) for the on/off details.
 - **Annotate** drops a note *into* that command timeline mid-session —
   `obsnote annotate "switching to venv setup here"` shows up as an Obsidian
   callout between command blocks the next time you `since` it.
@@ -89,10 +94,10 @@ history.
 | `obsnote note [text]` | append a freeform note (reads stdin if omitted) |
 | `obsnote run -- <cmd>` | run a command, capture output, append it |
 | `obsnote save [--output\|--synth]` | append the last captured command / its output / an LLM summary |
-| `obsnote mark [name]` | set a checkpoint in your shell history |
+| `obsnote mark [name]` | set a checkpoint in your shell history; turns passive capture on if it was off |
 | `obsnote marks [name]` | list markers, or preview commands since one |
-| `obsnote unmark [name]` | delete a marker |
-| `obsnote since [name] [--synth] [--ok-only]` | write everything since a marker (optionally summarized, optionally only what succeeded) |
+| `obsnote unmark [name]` | delete a marker; turns passive capture back off if no markers remain |
+| `obsnote since [name] [--synth] [--ok-only]` | write everything since a marker (optionally summarized, optionally only what succeeded); turns passive capture back off unless another marker is still pending |
 | `obsnote annotate [text]` | insert a note into the pending command timeline |
 | `obsnote summary [text]` | add a summary that posts before the pending command timeline |
 | `obsnote undo [--page]` | remove the last obsnote entry from a page |
@@ -103,16 +108,29 @@ history.
 | `obsnote doctor` | preflight check: vault, config, shell hook |
 | `obsnote pause` / `obsnote resume` | pause/resume passive shell-history capture, with a confirmed status readout |
 | `obsnote forget [--last N]` | clear captured commands/output from obsnote's local state (the vault is untouched) |
+| `obsnote shell-install <bash\|zsh>` | wire up the passive capture hook in your shell rc file (capture starts off) |
+| `obsnote shell-uninstall <bash\|zsh>` | remove the hook from your shell rc file; passive capture stops entirely |
 
 Run `obsnote <command> --help` for the full flag list on any of these.
 
 ## Shell integration
 
 `obsnote shell-install bash` adds a `PROMPT_COMMAND` hook to `~/.bashrc`
-(`obsnote shell-install zsh` adds a `precmd` hook to `~/.zshrc`) that
-passively records every command you type — along with its exit status and
-working directory — while skipping obsnote's own commands. Two guardrails on
-top of that:
+(`obsnote shell-install zsh` adds a `precmd` hook to `~/.zshrc`) that, once
+active, records every command you type — along with its exit status and
+working directory — while skipping obsnote's own commands.
+
+**Capture is opt-in, bracketed by mark/since.** A fresh `shell-install`
+leaves passive capture *off*. It turns itself on when you `obsnote mark`, and
+back off automatically once you `obsnote since` (or `obsnote unmark`) that
+marker — so a `mark` → do stuff → `since` session is fully recorded without
+you touching pause/resume, and nothing gets captured in between sessions or
+before you've ever run `mark`. If you `mark` more than one thing at once,
+`since` on one leaves capture on until the others are also closed out. Want
+it recording continuously instead, the old always-on way? `obsnote resume`
+does that — it stays on until you `obsnote pause` yourself.
+
+Two guardrails on top of that:
 
 - A **leading space** before a command keeps it out of both the shell's
   history and obsnote's capture — the standard `ignorespace` convention,
@@ -125,11 +143,18 @@ top of that:
 `obsnote run` bypasses redaction on purpose — if you explicitly ran a command
 through obsnote, that's an intentional capture, not passive history.
 
-Doing something sensitive and don't trust the pattern list to catch it? Run
-`obsnote pause` to pause passive capture entirely (it reads the state back
-and confirms it actually took), and `obsnote resume` when you're done. If
-something already slipped into the capture buffer, `obsnote forget --last 5`
-(or plain `obsnote forget` for everything) scrubs it from local state.
+Doing something sensitive mid-mark and don't trust the pattern list to catch
+it? Run `obsnote pause` to pause passive capture entirely (it reads the state
+back and confirms it actually took), and `obsnote resume` or `obsnote mark`
+when you're done. If something already slipped into the capture buffer,
+`obsnote forget --last 5` (or plain `obsnote forget` for everything) scrubs
+it from local state.
+
+Want obsnote out of your shell startup entirely? `obsnote shell-uninstall
+bash` (or `zsh`) removes the block `shell-install` added — no more passive
+capture, no more `obsnote remember-cmd` calls on every prompt. Explicit
+commands (`note`, `run`, `save`, ...) keep working; only the automatic hook
+goes away.
 
 One more guardrail: the *active page* is remembered per vault. If a
 project-local `.obsnote.json` points a directory at a different vault, a page

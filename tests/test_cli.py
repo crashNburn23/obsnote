@@ -186,6 +186,73 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("capture_paused = True", stdout)
 
+    def test_shell_install_leaves_capture_paused_by_default(self) -> None:
+        home = self.root / "home"
+        home.mkdir()
+        with mock.patch.object(cli.Path, "home", return_value=home):
+            code, stdout, _ = self.run_cli("shell-install", "bash")
+        self.assertEqual(code, 0)
+        self.assertIn("OFF by default", stdout)
+        self.assertTrue(self.read_state()["capture_paused"])
+
+    def test_shell_uninstall_removes_the_installed_block(self) -> None:
+        home = self.root / "home"
+        home.mkdir()
+        with mock.patch.object(cli.Path, "home", return_value=home):
+            self.run_cli("shell-install", "bash")
+            rc_before = (home / ".bashrc").read_text(encoding="utf-8")
+            self.assertIn("obsnote shell integration", rc_before)
+
+            code, stdout, _ = self.run_cli("shell-uninstall", "bash")
+            self.assertEqual(code, 0)
+            self.assertIn("Removed obsnote shell integration", stdout)
+            rc_after = (home / ".bashrc").read_text(encoding="utf-8")
+            self.assertNotIn("obsnote shell integration", rc_after)
+
+            code, stdout, _ = self.run_cli("shell-uninstall", "bash")
+            self.assertEqual(code, 0)
+            self.assertIn("not found", stdout)
+
+    def test_mark_auto_resumes_and_since_auto_pauses_capture(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("pause")
+        self.assertTrue(self.read_state()["capture_paused"])
+
+        code, _, stderr = self.run_cli("mark", "lab")
+        self.assertEqual(code, 0)
+        self.assertFalse(self.read_state()["capture_paused"])
+        self.assertIn("OFF -> ON", stderr)
+
+        self.run_cli("remember-cmd", "--", "echo one")
+        self.assertEqual([e["command"] for e in self.read_state()["command_history"]], ["echo one"])
+
+        code, stdout, stderr = self.run_cli("since", "lab")
+        self.assertEqual(code, 0)
+        self.assertEqual(Path(stdout.strip()), self.vault / "notes.md")
+        self.assertIn("ON -> OFF", stderr)
+        self.assertTrue(self.read_state()["capture_paused"])
+
+    def test_since_leaves_capture_on_when_other_markers_pending(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("mark", "lab1")
+        self.run_cli("mark", "lab2")
+        self.run_cli("remember-cmd", "--", "echo one")
+
+        code, _, stderr = self.run_cli("since", "lab1")
+        self.assertEqual(code, 0)
+        self.assertIn("staying ON", stderr)
+        self.assertFalse(self.read_state().get("capture_paused"))
+
+    def test_unmark_auto_pauses_when_last_marker_removed(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("mark", "lab")
+        self.assertFalse(self.read_state().get("capture_paused"))
+
+        code, _, stderr = self.run_cli("unmark", "lab")
+        self.assertEqual(code, 0)
+        self.assertIn("ON -> OFF", stderr)
+        self.assertTrue(self.read_state()["capture_paused"])
+
     def test_doctor_and_legacy_start_alias(self) -> None:
         self.write_config(vault=str(self.vault), note="notes.md")
         for name in ("doctor", "start"):

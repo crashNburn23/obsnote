@@ -504,6 +504,11 @@ def is_capture_paused() -> bool:
     return bool(load_last().get("capture_paused"))
 
 
+def set_capture_paused(paused: bool) -> bool:
+    save_last({"capture_paused": paused})
+    return is_capture_paused() == paused
+
+
 def cmd_remember_cmd(args: argparse.Namespace) -> int:
     command = " ".join(strip_separator(args.command)).strip()
     if not command:
@@ -518,14 +523,13 @@ def cmd_remember_cmd(args: argparse.Namespace) -> int:
 
 
 def cmd_pause(_: argparse.Namespace) -> int:
-    save_last({"capture_paused": True})
-    confirmed = is_capture_paused()
+    confirmed = set_capture_paused(True)
     print("Pausing passive shell-history capture...")
     print(f"Confirmed: capture_paused = {confirmed}")
     if confirmed:
         print("obsnote will not record anything typed at the shell until you run: obsnote resume")
-        print("Explicit commands (note/run/save/annotate) still work normally -- only the passive")
-        print("shell hook is paused.")
+        print("(or `obsnote mark`, which turns capture back on too). Explicit commands")
+        print("(note/run/save/annotate) still work normally -- only the passive shell hook is paused.")
     else:
         print("WARNING: could not confirm the paused state was saved. Check permissions on:")
         print(f"  {state_path()}")
@@ -591,10 +595,9 @@ def cmd_undo(args: argparse.Namespace) -> int:
 
 
 def cmd_resume(_: argparse.Namespace) -> int:
-    save_last({"capture_paused": False})
-    confirmed = not is_capture_paused()
+    confirmed = set_capture_paused(False)
     print("Resuming passive shell-history capture...")
-    print(f"Confirmed: capture_paused = {not confirmed}")
+    print(f"Confirmed: capture_paused = {is_capture_paused()}")
     return 0 if confirmed else 1
 
 
@@ -812,6 +815,9 @@ def cmd_mark(args: argparse.Namespace) -> int:
     settings = load_settings()
     page = resolve_target_page(args.page, settings)
     name = marker_name(args.name)
+    if is_capture_paused():
+        set_capture_paused(False)
+        print("capture: OFF -> ON (recording until `since`/`unmark`)", file=sys.stderr)
     set_marker(name, page)
     return 0
 
@@ -862,6 +868,9 @@ def cmd_mark_del(args: argparse.Namespace) -> int:
     data["updated_at"] = now_stamp()
     save_json(state_path(), data)
     print(f"Deleted marker `{name}`")
+    if not all_markers and not is_capture_paused():
+        set_capture_paused(True)
+        print("capture: ON -> OFF (auto-paused; no markers left)", file=sys.stderr)
     return 0
 
 
@@ -1000,10 +1009,23 @@ def cmd_synth_since(args: argparse.Namespace) -> int:
     return 0
 
 
+def maybe_auto_pause_after_since() -> None:
+    if is_capture_paused():
+        return
+    if len(markers(load_last())) > 1:
+        print(
+            "capture: staying ON -- other markers are still pending (run `obsnote pause` if you're done)",
+            file=sys.stderr,
+        )
+        return
+    set_capture_paused(True)
+    print("capture: ON -> OFF (auto-paused; run `obsnote resume` to keep recording)", file=sys.stderr)
+
+
 def cmd_since(args: argparse.Namespace) -> int:
-    if args.synth:
-        return cmd_synth_since(args)
-    return cmd_history_since(args)
+    result = cmd_synth_since(args) if args.synth else cmd_history_since(args)
+    maybe_auto_pause_after_since()
+    return result
 
 
 def cmd_page_new(args: argparse.Namespace) -> int:
@@ -1065,7 +1087,7 @@ def cmd_show(_: argparse.Namespace) -> int:
     settings = load_settings()
     data = load_last()
     paused = bool(data.get("capture_paused"))
-    print(f"capture: {'PAUSED (run: obsnote resume)' if paused else 'active'}")
+    print(f"capture: {'PAUSED (auto-resumes on `obsnote mark`, or run: obsnote resume)' if paused else 'active'}")
     active, mismatched = active_page_for(settings, data)
     print(f"active page: {active or '(none, using default)'}")
     if mismatched:
@@ -1191,6 +1213,17 @@ def shell_init_block(shell: str) -> str:
     )
 
 
+# Matches whatever shell_init_block() appended, regardless of which shell it
+# was installed for -- lets `shell-uninstall` clean it up even if it drifted
+# slightly from the exact string shell-install would write today.
+SHELL_INTEGRATION_BLOCK_RE = re.compile(
+    r"\n?# obsnote shell integration\n"
+    r"if command -v obsnote >/dev/null 2>&1; then\n"
+    r"  eval \"\$\(obsnote shell-init \w+\)\"\n"
+    r"fi\n"
+)
+
+
 def cmd_shell_install(args: argparse.Namespace) -> int:
     rc = Path.home() / SHELL_RC[args.shell]
     existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
@@ -1202,8 +1235,30 @@ def cmd_shell_install(args: argparse.Namespace) -> int:
         if existing and not existing.endswith("\n"):
             fh.write("\n")
         fh.write(shell_init_block(args.shell))
+    set_capture_paused(True)
     print(f"Added obsnote shell integration to {rc}")
     print(f"Open a new shell, or run: source ~/{SHELL_RC[args.shell]}")
+    print("Passive capture is OFF by default. It turns on automatically when you run")
+    print("`obsnote mark`, and back off after `obsnote since`/`unmark` -- or run")
+    print("`obsnote resume` yourself to leave it recording continuously.")
+    return 0
+
+
+def cmd_shell_uninstall(args: argparse.Namespace) -> int:
+    rc = Path.home() / SHELL_RC[args.shell]
+    if not rc.exists():
+        print(f"No {rc} found -- nothing to remove.")
+        return 0
+    text = rc.read_text(encoding="utf-8")
+    new_text, count = SHELL_INTEGRATION_BLOCK_RE.subn("", text)
+    if count == 0:
+        print(f"obsnote shell integration not found in {rc}")
+        return 0
+    rc.write_text(new_text, encoding="utf-8")
+    print(f"Removed obsnote shell integration from {rc}")
+    print(f"Open a new shell, or run: source ~/{SHELL_RC[args.shell]}")
+    print("Passive capture won't run anymore -- explicit commands (note/run/save/mark/...)")
+    print("still work normally.")
     return 0
 
 
@@ -1275,7 +1330,8 @@ def cmd_doctor(_: argparse.Namespace) -> int:
 
     paused = is_capture_paused()
     if paused:
-        print("[--] capture is PAUSED -- run: obsnote resume")
+        print("[--] capture is PAUSED (default) -- turns on automatically with `obsnote mark`,")
+        print("     or run: obsnote resume")
     else:
         print("[ok] capture is active (not paused)")
 
@@ -1427,6 +1483,10 @@ def build_parser() -> argparse.ArgumentParser:
     shell_install = sub.add_parser("shell-install", help="install shell integration")
     shell_install.add_argument("shell", choices=sorted(SHELL_INIT))
     shell_install.set_defaults(func=cmd_shell_install)
+
+    shell_uninstall = sub.add_parser("shell-uninstall", help="remove shell integration installed via shell-install")
+    shell_uninstall.add_argument("shell", choices=sorted(SHELL_INIT))
+    shell_uninstall.set_defaults(func=cmd_shell_uninstall)
 
     doctor = sub.add_parser("doctor", help="check that the vault, config, and shell hook are ready to go")
     doctor.set_defaults(func=cmd_doctor)
