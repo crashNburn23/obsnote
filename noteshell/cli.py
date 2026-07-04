@@ -21,6 +21,7 @@ APP_NAME = "noteshell"
 DEFAULT_NOTE = "Notebook/Linux.md"
 DEFAULT_MAX_OUTPUT_CHARS = 40000
 DEFAULT_HISTORY_LIMIT = 2000
+DEFAULT_FORGET_ON_EXIT = True
 PROJECT_CONFIG_NAME = ".noteshell.json"
 
 # Case-insensitive patterns checked against typed shell commands before they're
@@ -55,6 +56,7 @@ class Settings:
     note: str
     max_output_chars: int
     redact_patterns: list[str]
+    forget_on_exit: bool
 
 
 def xdg_config_home() -> Path:
@@ -134,6 +136,18 @@ def find_project_config(start: Path | None) -> Path | None:
     return None
 
 
+def parse_bool_setting(value: Any, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    raise SystemExit(f"{field} must be a boolean (true/false)")
+
+
 def load_settings() -> Settings:
     cfg = load_json(config_path())
     project_config = find_project_config(safe_cwd())
@@ -158,11 +172,18 @@ def load_settings() -> Settings:
             extra_patterns.extend(str(p) for p in raw_patterns)
     redact_patterns = DEFAULT_REDACT_PATTERNS + extra_patterns
 
+    forget_on_exit_raw = os.environ.get(
+        "NOTESHELL_FORGET_ON_EXIT",
+        project_cfg.get("forget_on_exit", cfg.get("forget_on_exit", DEFAULT_FORGET_ON_EXIT)),
+    )
+    forget_on_exit = parse_bool_setting(forget_on_exit_raw, field="forget_on_exit")
+
     return Settings(
         vault=Path(vault_raw).expanduser() if vault_raw else None,
         note=str(note),
         max_output_chars=max_output_chars,
         redact_patterns=redact_patterns,
+        forget_on_exit=forget_on_exit,
     )
 
 
@@ -488,6 +509,9 @@ def cmd_config(args: argparse.Namespace) -> int:
                 existing.append(pattern)
         cfg["redact_patterns"] = existing
         changed = True
+    if args.forget_on_exit is not None:
+        cfg["forget_on_exit"] = args.forget_on_exit
+        changed = True
     if changed:
         save_json(config_path(), cfg)
     settings = load_settings()
@@ -499,6 +523,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     print(f"note: {settings.note}")
     print(f"max_output_chars: {settings.max_output_chars}")
     print(f"redact_patterns: {', '.join(settings.redact_patterns)}")
+    print(f"forget_on_exit: {settings.forget_on_exit}")
     return 0
 
 
@@ -572,12 +597,83 @@ def cmd_pause(_: argparse.Namespace) -> int:
     return 0 if confirmed else 1
 
 
-def cmd_forget(args: argparse.Namespace) -> int:
+def forget_all() -> tuple[int, int]:
+    """Clear all captured commands/output/markers from local state.
+
+    Returns (commands forgotten, markers forgotten).
+    """
     data = load_last()
     history = command_history(data)
+    forgotten = len(history)
+    marker_count = len(markers(data))
+    for key in ("command_history", "command", "output", "return_code", "markers"):
+        data.pop(key, None)
+    data["updated_at"] = now_stamp()
+    save_json(state_path(), data)
+    return forgotten, marker_count
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # Any other errno (e.g. EPERM) means the pid exists but we can't signal it.
+        return True
+    return True
+
+
+def clear_active_shell() -> None:
+    data = load_last()
+    if "active_shell" in data:
+        data.pop("active_shell", None)
+        data["updated_at"] = now_stamp()
+        save_json(state_path(), data)
+
+
+def check_stale_shell_session() -> None:
+    """Detect a `noteshell shell` process that never reached its own exit cleanup.
+
+    `kill -9` and crashes can't be intercepted by the process being killed, so
+    there's no way for that process to clean up after itself. Instead, every
+    later noteshell invocation checks whether the pid it recorded is still
+    alive; if not, it applies the same forget_on_exit cleanup right now.
+    """
+    data = load_last()
+    info = data.get("active_shell")
+    if not isinstance(info, dict) or not isinstance(info.get("pid"), int):
+        return
+    if pid_alive(info["pid"]):
+        return
+    marker = info.get("marker")
+    data.pop("active_shell", None)
+    data["updated_at"] = now_stamp()
+    save_json(state_path(), data)
+    settings = load_settings()
+    if settings.forget_on_exit:
+        forgotten, marker_count = forget_all()
+        print(
+            f"noteshell: a `noteshell shell` session (marker `{marker}`, pid {info['pid']}) never "
+            f"exited cleanly (crash or kill -9); cleared {forgotten} captured command(s) and "
+            f"{marker_count} marker(s). Disable with `noteshell config --no-forget-on-exit`.",
+            file=sys.stderr,
+        )
+    elif marker:
+        print(
+            f"noteshell: a `noteshell shell` session (marker `{marker}`, pid {info['pid']}) never "
+            "exited cleanly (crash or kill -9); its captured commands are still in state -- run "
+            "`noteshell since` to save them or `noteshell forget` to clear them.",
+            file=sys.stderr,
+        )
+
+
+def cmd_forget(args: argparse.Namespace) -> int:
     if args.last is not None:
         if args.last <= 0:
             raise SystemExit("--last must be a positive number of commands.")
+        data = load_last()
+        history = command_history(data)
         forgotten = min(args.last, len(history))
         history = history[: len(history) - forgotten]
         data["command_history"] = history
@@ -586,18 +682,15 @@ def cmd_forget(args: argparse.Namespace) -> int:
                 marker["index"] = min(marker["index"], len(history))
         for key in ("command", "output", "return_code"):
             data.pop(key, None)
+        data["updated_at"] = now_stamp()
+        save_json(state_path(), data)
         print(f"Forgot the last {forgotten} captured command(s) and the last remembered command/output.")
     else:
-        forgotten = len(history)
-        marker_count = len(markers(data))
-        for key in ("command_history", "command", "output", "return_code", "markers"):
-            data.pop(key, None)
+        forgotten, marker_count = forget_all()
         print(
             f"Forgot {forgotten} captured command(s), the last remembered command/output, "
             f"and {marker_count} marker(s)."
         )
-    data["updated_at"] = now_stamp()
-    save_json(state_path(), data)
     print("Nothing already written to the vault was touched -- `noteshell undo` removes vault entries.")
     return 0
 
@@ -1242,18 +1335,19 @@ def cmd_shell(args: argparse.Namespace) -> int:
     binary = shutil.which(SHELL_BIN[shell])
     if binary is None:
         raise SystemExit(f"{shell} was not found on PATH.")
+    settings = load_settings()
     marker_name_started = ""
     if args.no_mark:
         if not markers(load_last()):
             set_capture_paused(True)
     else:
-        settings = load_settings()
         page = resolve_target_page(args.page, settings)
         marker_name_started = args.mark_name or next_auto_marker_name(markers(load_last()))
         if is_capture_paused():
             set_capture_paused(False)
             print("capture: OFF -> ON (recording until `since` or shell exit)", file=sys.stderr)
         set_marker(marker_name_started, page)
+        save_last({"active_shell": {"pid": os.getpid(), "marker": marker_name_started}})
     with tempfile.TemporaryDirectory(prefix="noteshell-shell-") as tmp:
         tmpdir = Path(tmp)
         env = os.environ.copy()
@@ -1270,7 +1364,15 @@ def cmd_shell(args: argparse.Namespace) -> int:
         print(f"Starting temporary noteshell {shell} shell. Exit to return.")
         code = subprocess.call(argv, env=env)
     if marker_name_started:
+        clear_active_shell()
         finish_shell_marker(marker_name_started)
+    if settings.forget_on_exit:
+        forgotten, marker_count = forget_all()
+        if forgotten or marker_count:
+            print(
+                f"Cleared {forgotten} captured command(s) and {marker_count} marker(s) on exit "
+                "(disable with `noteshell config --no-forget-on-exit`)."
+            )
     return code
 
 
@@ -1344,6 +1446,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="regex; matching typed commands are never captured by the shell hook (repeatable)",
+    )
+    config.add_argument(
+        "--forget-on-exit",
+        dest="forget_on_exit",
+        action="store_true",
+        default=None,
+        help="clear captured commands/output when `noteshell shell` exits (default: on)",
+    )
+    config.add_argument(
+        "--no-forget-on-exit",
+        dest="forget_on_exit",
+        action="store_false",
+        help="keep captured commands/output around after `noteshell shell` exits",
     )
     config.set_defaults(func=cmd_config)
 
@@ -1458,6 +1573,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
+    # remember-cmd/recording-status run on every single typed command via the
+    # shell hook -- skip the stale-session check there and let it run once per
+    # actual noteshell invocation instead.
+    if not argv or argv[0] not in ("remember-cmd", "recording-status", "shell-init"):
+        check_stale_shell_session()
     if argv and argv[0] == "remember-cmd":
         remember = argparse.ArgumentParser(prog="noteshell remember-cmd")
         remember.add_argument("--status", type=int, default=None, help="exit status of the command")

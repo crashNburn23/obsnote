@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -221,7 +222,8 @@ class CliTest(unittest.TestCase):
         self.assertIn('page() { command noteshell page "$@"; }', str(launched["rc_text"]))
         state = self.read_state()
         self.assertTrue(state["capture_paused"])
-        self.assertEqual(state["markers"], {})
+        self.assertNotIn("markers", state)
+        self.assertNotIn("active_shell", state)
 
     def test_shell_exit_can_save_pending_session_with_since(self) -> None:
         self.write_config(vault=str(self.vault), note="notes.md")
@@ -245,8 +247,128 @@ class CliTest(unittest.TestCase):
         text = (self.vault / "notes.md").read_text(encoding="utf-8")
         self.assertIn("echo from shell", text)
         state = self.read_state()
-        self.assertEqual(state.get("markers"), {})
+        self.assertNotIn("markers", state)
+        self.assertNotIn("command_history", state)
         self.assertTrue(state["capture_paused"])
+
+    def test_shell_exit_clears_captured_state_by_default(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        home = self.root / "home"
+        home.mkdir()
+
+        def fake_call(argv: list[str], env: dict[str, str]) -> int:
+            self.run_cli("remember-cmd", "--", "echo from shell")
+            return 0
+
+        with (
+            mock.patch.object(cli.Path, "home", return_value=home),
+            mock.patch.object(cli.shutil, "which", return_value="/bin/bash"),
+            mock.patch.object(cli.subprocess, "call", side_effect=fake_call),
+            mock.patch("builtins.input", return_value="n"),
+        ):
+            code, stdout, _ = self.run_cli("shell", "--mark", "lab", "bash")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Cleared", stdout)
+        state = self.read_state()
+        self.assertNotIn("markers", state)
+        self.assertNotIn("command_history", state)
+        self.assertNotIn("command", state)
+
+    def test_shell_no_forget_on_exit_keeps_captured_state(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md", forget_on_exit=False)
+        home = self.root / "home"
+        home.mkdir()
+
+        def fake_call(argv: list[str], env: dict[str, str]) -> int:
+            self.run_cli("remember-cmd", "--", "echo from shell")
+            return 0
+
+        with (
+            mock.patch.object(cli.Path, "home", return_value=home),
+            mock.patch.object(cli.shutil, "which", return_value="/bin/bash"),
+            mock.patch.object(cli.subprocess, "call", side_effect=fake_call),
+            mock.patch("builtins.input", return_value="n"),
+        ):
+            code, stdout, _ = self.run_cli("shell", "--mark", "lab", "bash")
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("Cleared", stdout)
+        state = self.read_state()
+        self.assertEqual(
+            [e["command"] for e in state["command_history"]],
+            ["echo from shell"],
+        )
+
+    def test_config_reports_and_toggles_forget_on_exit(self) -> None:
+        code, stdout, _ = self.run_cli("config")
+        self.assertEqual(code, 0)
+        self.assertIn("forget_on_exit: True", stdout)
+
+        code, stdout, _ = self.run_cli("config", "--no-forget-on-exit")
+        self.assertEqual(code, 0)
+        self.assertIn("forget_on_exit: False", stdout)
+        self.assertFalse(
+            json.loads(cli.config_path().read_text(encoding="utf-8"))["forget_on_exit"]
+        )
+
+        code, stdout, _ = self.run_cli("config", "--forget-on-exit")
+        self.assertEqual(code, 0)
+        self.assertIn("forget_on_exit: True", stdout)
+
+    def _inject_dead_active_shell(self, marker: str) -> None:
+        proc = subprocess.Popen(["true"])
+        dead_pid = proc.pid
+        proc.wait()
+        data = self.read_state()
+        data["active_shell"] = {"pid": dead_pid, "marker": marker}
+        cli.save_json(cli.state_path(), data)
+
+    def test_stale_shell_session_is_detected_and_cleaned_up(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("mark", "lab")
+        self.run_cli("remember-cmd", "--", "echo one")
+        self._inject_dead_active_shell("lab")
+
+        code, stdout, stderr = self.run_cli("show")
+
+        self.assertEqual(code, 0)
+        self.assertIn("never exited cleanly", stderr)
+        state = self.read_state()
+        self.assertNotIn("active_shell", state)
+        self.assertNotIn("markers", state)
+        self.assertNotIn("command_history", state)
+
+    def test_stale_shell_session_with_forget_on_exit_disabled_warns_but_keeps_state(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md", forget_on_exit=False)
+        self.run_cli("mark", "lab")
+        self.run_cli("remember-cmd", "--", "echo one")
+        self._inject_dead_active_shell("lab")
+
+        code, stdout, stderr = self.run_cli("show")
+
+        self.assertEqual(code, 0)
+        self.assertIn("never exited cleanly", stderr)
+        state = self.read_state()
+        self.assertNotIn("active_shell", state)
+        self.assertEqual([e["command"] for e in state["command_history"]], ["echo one"])
+        self.assertIn("lab", state["markers"])
+
+    def test_active_shell_with_live_pid_is_left_alone(self) -> None:
+        self.write_config(vault=str(self.vault), note="notes.md")
+        self.run_cli("mark", "lab")
+        self.run_cli("remember-cmd", "--", "echo one")
+        data = self.read_state()
+        data["active_shell"] = {"pid": os.getpid(), "marker": "lab"}
+        cli.save_json(cli.state_path(), data)
+
+        code, stdout, stderr = self.run_cli("show")
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("never exited cleanly", stderr)
+        state = self.read_state()
+        self.assertIn("active_shell", state)
+        self.assertIn("lab", state["markers"])
 
     def test_shell_no_mark_starts_temporary_zsh_hook_paused(self) -> None:
         home = self.root / "home"

@@ -17,19 +17,17 @@ history: useful, convenient, not private.
 
 - Recording only ever happens inside a subshell you explicitly started with
   `noteshell shell` — noteshell never touches your real `~/.bashrc`/`~/.zshrc`,
-  and there's no lingering hook to forget about. If that subshell is killed
-  instead of exited normally (crash, `kill -9`), though, the marker it opened
-  and the "capture on" state can stick around until you next run `noteshell
-  shell` or `noteshell pause` — nothing keeps recording in the meantime, but
-  it's worth a `noteshell show` if something seems stuck.
+  and there's no lingering hook to forget about. Commands sit as a rolling
+  plaintext shadow (plus the last command's full output) under
+  `~/.local/state/noteshell/` until `since` writes them out; exiting the
+  subshell clears whatever's left by default, including if it was killed
+  or crashed (`noteshell config --no-forget-on-exit` to keep it around, and
+  `noteshell forget` to clear it by hand anytime).
 - Redaction only filters commands captured inside that subshell. `noteshell
   run`, and any command's *output* (an env dump, a curl response with a
   token in it), goes into your vault **unfiltered**.
 - Notes are plain markdown on disk. If your vault syncs anywhere (Obsidian
   Sync, iCloud, Dropbox, a git repo), whatever noteshell writes goes with it.
-- Between `shell` and `since`, commands sit as a rolling plaintext shadow
-  (plus the last command's full output) under `~/.local/state/noteshell/`.
-  `noteshell forget` clears it.
 - It's one small module (`noteshell/cli.py`). If you're unsure what it's doing
   with your data, it's a quick read.
 
@@ -86,7 +84,7 @@ note, command, output, or history.
 
 | Command | What it does |
 |---|---|
-| `noteshell config` | show/set vault, default page, redaction, and output limits |
+| `noteshell config` | show/set vault, default page, redaction, output limits, and forget-on-exit |
 | `noteshell note [text]` | append a freeform note (reads stdin if omitted) |
 | `noteshell run -- <cmd>` | run a command, capture output, append it |
 | `noteshell shell [bash\|zsh] [--mark NAME] [--page NAME] [--no-mark]` | open a recording subshell, marking a session by default |
@@ -114,6 +112,19 @@ Unless you pass `--no-mark`, `noteshell shell` opens a marker on entry, the
 same one `since` writes and closes. Exit normally without saving and you're
 asked to confirm; decline and the marker's deleted, capture pauses if
 nothing else is pending.
+
+On exit, `noteshell shell` also runs the equivalent of `noteshell forget` --
+clearing any captured commands/output/markers left in local state, saved or
+not -- so nothing lingers between sessions. Turn that off with `noteshell
+config --no-forget-on-exit` (back on with `--forget-on-exit`), e.g. if you
+want `noteshell show`/`noteshell since` to see across separate `shell`
+invocations.
+
+That cleanup also covers a subshell that's killed or crashes instead of
+exiting normally: `noteshell shell` records its own pid before handing off
+to the subshell, and the next noteshell command you run notices that pid is
+gone and applies the same exit cleanup then (or just warns, if
+`forget_on_exit` is off).
 
 Guardrails on top of that:
 
